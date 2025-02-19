@@ -9,6 +9,7 @@ The study uses data from the Adolescent Brain Cognitive Development (ABCD) study
 
 Data Preprocessing: Conducted in Google Colab
 Statistical Analysis: Generalized Additive Models (GAM) performed in R version 4.3.1 using the 'mgcv' package
+
 dMRI Harmonized Data: Details available in our previous study: https://www.nature.com/articles/s41597-024-03058-w
 
 Multi-site diffusion MRI data Harmonization software:
