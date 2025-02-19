@@ -1,0 +1,291 @@
+---
+title: "GAM Model partial effect graphs + heatmaps"
+author: "Neslihan Yildiz Ozhan"
+date: "2024-01-16"
+output: html_document
+---
+
+```{r}
+#NIH Toolbox visualization
+library(ggplot2)
+library(mgcv)
+library(dplyr)
+library(gratia)
+data <- read.csv("~/Desktop/ABCD/abcd_coi.csv")
+# z-score scale 
+
+data <- data %>%
+  mutate(
+    across(ends_with("_Ten1_FA"), scale),
+    across(starts_with("nih"), scale),
+    across(starts_with("coi"), scale)
+  )
+
+
+optimize_k_by_aic <- function(data, y_column, coi_column = "coi_total_raw") {
+  k_values <- 3:12
+  best_k <- NULL
+  best_aic <- Inf 
+  
+  model_data <- data %>%
+    filter(!is.na(y_column))
+  
+  for (k in k_values) {
+    model <- gam(as.formula(paste(y_column, "~ s(", coi_column, ", k = ", k, ") + 
+                                 s(interview_age, k = ", k, ") + factor(sex) + factor(race) + 
+                                 factor(ethnicity) + factor(totalincome) + s(parenteducation, k = ", k, ") + 
+                                 s(bmi, k =", k, ") + factor(puberty_stage) + factor(sleep_category) + 
+                                 factor(fam_hx) + s(rel_family_id, k = ", k, ") + factor(site_id_l)"
+                                 ))
+                              , 
+                   data = model_data)
+    
+    aic_score <- AIC(model)
+    if (aic_score < best_aic) {
+      best_aic <- aic_score
+      best_k <- k
+    }
+  }
+  
+  final_model <- gam(as.formula(paste(y_column, "~ s(", coi_column, ", k = ", best_k, ") + 
+                                      s(interview_age, k = ", best_k, ") + factor(sex) + factor(race) + 
+                                      factor(ethnicity) + factor(totalincome) + s(parenteducation, k = ", best_k, ") + 
+                                      s(bmi, k =", best_k, ") + factor(puberty_stage) + factor(sleep_category) + 
+                                      factor(fam_hx) + s(rel_family_id, k =", best_k, ") + 
+                                     + factor(site_id_l)")), 
+                     data = model_data)
+  
+  return(list(model = final_model, best_k = best_k))
+}
+
+y_columns <- grep("^nih", names(data), value = TRUE)
+plots <- list()
+
+for (y_col in y_columns) {
+  result <- optimize_k_by_aic(data, y_col)
+  model <- result$model
+  best_k <- result$best_k
+  
+  plot <- draw(model, select = "s(coi_total_raw)", ci_col = "steelblue",ci_alpha = 0.3, rug = FALSE) +
+    ggtitle(paste(" ")) +
+    ylab(paste("Partial effect (", y_col, ")", sep=""))+
+    xlab("COI Overall")+
+    geom_line(linewidth=1.5, col="darkblue")
+  
+  plots[[y_col]] <- plot
+}
+
+plots$nihtbx_totalcomp_uncorrected
+plots$nihtbx_cryst_uncorrected
+plots$nihtbx_fluidcomp_uncorrected
+plots$nihtbx_picvocab_uncorrected
+plots$nihtbx_reading_uncorrected
+plots$nihtbx_flanker_uncorrected
+plots$nihtbx_list_uncorrected
+plots$nihtbx_cardsort_uncorrected
+plots$nihtbx_pattern_uncorrected
+plots$nihtbx_picture_uncorrected
+```
+
+```{r}
+
+
+optimize_k_by_aic <- function(data, y_column, coi_column = "coi_total_raw") {
+  k_values <- 3:11  
+  best_k <- NULL
+  best_aic <- Inf  
+  model_data <- data %>%
+    filter(!is.na(y_column))
+  
+  for (k in k_values) {
+    model <- gam(as.formula(paste(y_column, "~ s(", coi_column, ", k = ", k, ") + 
+                                 s(interview_age, k = ", k, ") + factor(sex) + factor(race) + 
+                                 factor(ethnicity) + factor(totalincome) + s(parenteducation, k = ", k, ") + 
+                                 s(bmi, k =", k, ") + factor(puberty_stage) + factor(sleep_category) + 
+                                 factor(fam_hx) + s(rel_family_id, k =", k, ") + 
+                                 s(dmri_meanmotion, k=", k, ")")), 
+                   data = model_data)
+    
+    aic_score <- AIC(model)
+    
+    if (aic_score < best_aic) {
+      best_aic <- aic_score
+      best_k <- k
+    }
+  }
+  
+  final_model <- gam(as.formula(paste(y_column, "~ s(", coi_column, ", k = ", best_k, ") + 
+                                      s(interview_age, k = ", best_k, ") + factor(sex) + factor(race) + 
+                                      factor(ethnicity) + factor(totalincome) + s(parenteducation, k = ", best_k, ") + 
+                                      s(bmi, k =", best_k, ") + factor(puberty_stage) + factor(sleep_category) + 
+                                      factor(fam_hx) + s(rel_family_id, k =", best_k, ") + 
+                                      s(dmri_meanmotion, k=", best_k, ")")), 
+                     data = model_data)
+  
+  return(list(model = final_model, best_k = best_k))
+}
+
+y_columns <- c("SLF_I_left_Ten1_FA", "SLF_I_right_Ten1_FA")
+plots <- list()
+
+for (y_col in y_columns) {
+  result <- optimize_k_by_aic(data, y_col)
+  model <- result$model
+  best_k <- result$best_k
+
+  plot <- draw(model, select = "s(coi_total_raw)", ci_col = "steelblue",ci_alpha = 0.3, rug = FALSE) +
+    ggtitle(paste(" ")) +
+    ylab(paste("Partial effect (", y_col, ")", sep=""))+
+    xlab("COI Overall")+
+    geom_line(size=1.5, col="darkblue")
+  
+  plots[[y_col]] <- plot
+}
+
+plots$SLF_I_left_Ten1_FA
+plots$SLF_I_right_Ten1_FA
+```
+
+
+```{r}
+
+# Cognition heatmap
+
+library(ggplot2)
+library(reshape2)
+library(openxlsx)
+
+combined_results = read.csv("~/Desktop/ABCD/combined_results_coi.csv")
+
+heatmap_data <- combined_results %>%
+  select(Column, AdjR2, DevExp, FStatistic, PValue, CorrectedPValue, Type) %>%
+  mutate(Significance = case_when(
+    CorrectedPValue < 0.001 ~ "***",
+    CorrectedPValue < 0.01  ~ "**",
+    CorrectedPValue < 0.05  ~ "*",
+    TRUE                    ~ ""
+  ))
+
+column_mapping <- c(
+  "nihtbx_totalcomp_uncorrected" = "Total Cognition Composite",
+  "nihtbx_fluidcomp_uncorrected" = "Fluid Cognition Composite",
+  "nihtbx_cryst_uncorrected" = "Crystallized Cognition Composite",
+  "nihtbx_picvocab_uncorrected" = "Picture Vocabulary",
+  "nihtbx_flanker_uncorrected" = "Flanker Inhibitory Control and Attention",
+  "nihtbx_list_uncorrected" = "List Sorting Working Memory",
+  "nihtbx_cardsort_uncorrected" = "Dimensional Change Card Sort",
+  "nihtbx_pattern_uncorrected" = "Pattern Comparison Processing Speed",
+  "nihtbx_picture_uncorrected" = "Picture Sequence Memory",
+  "nihtbx_reading_uncorrected" = "Oral Reading Recognition"
+)
+
+heatmap_data$Column <- recode(heatmap_data$Column, !!!column_mapping)
+
+heatmap_data$Column <- factor(heatmap_data$Column, levels = c(
+  "Oral Reading Recognition",
+  "Picture Sequence Memory",
+  "Pattern Comparison Processing Speed",
+  "Dimensional Change Card Sort",
+  "List Sorting Working Memory",
+  "Flanker Inhibitory Control and Attention",
+  "Picture Vocabulary",
+  "Crystallized Cognition Composite",
+  "Fluid Cognition Composite",
+  "Total Cognition Composite"
+))
+
+heatmap_matrix <- dcast(heatmap_data, Column ~ Type, value.var = "FStatistic", fill = 0)
+
+long_data <- melt(heatmap_matrix, id.vars = "Column") %>%
+  rename(Type = variable) %>% 
+  left_join(heatmap_data %>% select(Column, Type, Significance, FStatistic), 
+            by = c("Column", "Type", "value" = "FStatistic")) %>%
+  mutate(Type = factor(Type, levels = c("Overall", "ED", "SE", "HE")))
+
+p <- ggplot(long_data, aes(x = Type, y = Column, fill = value)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = paste0(Significance)), size = 14, color="white", vjust=0.8) +
+  scale_fill_gradient(low = "#E8F5E9", high = "#1B5E20") +
+  theme_minimal() +
+  labs(title = " ",
+       x = " ",
+       y = " ",
+       fill = "F-statistics") +
+  theme(axis.text.x = element_text(hjust = 0.5, size = 18, face="bold"), 
+        axis.text.y=element_text(size =20, face= "bold"),
+    legend.key.height = unit(1.2, "cm"),  # Increase height
+    legend.key.width = unit(0.7, "cm"),
+    legend.title = element_text(size = 20),  # Increase legend title size
+    legend.text = element_text(size = 16))
+
+
+ggsave("~/Desktop/coi_combined_nih_heatmap.png", p, width = 12, height = 8)
+```
+
+```{r}
+
+combined_results = read.csv("~/Desktop/ABCD/combined_results_dmri.csv")
+
+heatmap_data_dmri <- combined_results_dmri %>%
+  select(Column, AdjR2, DevExp, FStatistic, PValue, CorrectedPValue, Type) %>%
+  mutate(Significance = case_when(
+    CorrectedPValue < 0.001 ~ "***",
+    CorrectedPValue < 0.01  ~ "**",
+    CorrectedPValue < 0.05  ~ "*",
+    TRUE                    ~ ""
+  ))
+
+dmri_column_mapping <- c(
+  "UF -R" = "UF_right_Ten1_FA",
+  "UF -L" = "UF_left_Ten1_FA",
+  "SLF -III -R" = "SLF_III_right_Ten1_FA",
+  "SLF -III -L" = "SLF_III_left_Ten1_FA",
+  "SLF -II -R" = "SLF_II_right_Ten1_FA",
+  "SLF -II -L" = "SLF_II_left_Ten1_FA",
+  "SLF -I -R" = "SLF_I_right_Ten1_FA",
+  "SLF -I -L" = "SLF_I_left_Ten1_FA",
+  "MdLF -R" = "MdLF_right_Ten1_FA",
+  "MdLF -L" = "MdLF_left_Ten1_FA",
+  "IOFF -R" = "IOFF_right_Ten1_FA",
+  "IOFF -L" = "IOFF_left_Ten1_FA",
+  "ILF -R" = "ILF_right_Ten1_FA",
+  "ILF -L" = "ILF_left_Ten1_FA",
+  "EmC -R" = "EmC_right_Ten1_FA",
+  "EmC -L" = "EmC_left_Ten1_FA",
+  "CB -R" = "CB_right_Ten1_FA",
+  "CB -L" = "CB_left_Ten1_FA",
+  "AF -R" = "AF_right_Ten1_FA",
+  "AF -L" = "AF_left_Ten1_FA"
+)
+
+heatmap_data_dmri$Column <- recode(heatmap_data_dmri$Column, !!!setNames(names(dmri_column_mapping), dmri_column_mapping))
+
+heatmap_data_dmri$Column <- factor(heatmap_data_dmri$Column, levels = names(dmri_column_mapping))
+
+heatmap_matrix_dmri <- dcast(heatmap_data_dmri, Column ~ Type, value.var = "FStatistic", fill = 0)
+
+long_data_dmri <- melt(heatmap_matrix_dmri, id.vars = "Column") %>%
+  rename(Type = variable) %>%  
+  left_join(heatmap_data_dmri %>% select(Column, Type, Significance, FStatistic), 
+            by = c("Column", "Type", "value" = "FStatistic")) %>%
+  mutate(Type = factor(Type, levels = c("Overall", "ED", "SE", "HE")))
+
+p_dmri <- ggplot(long_data_dmri, aes(x = Type, y = Column, fill = value)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = paste0(Significance)), size = 12, color="white", vjust=0.7) +
+  scale_fill_gradient(low = "lavenderblush1", high = "darkorchid4") +
+  theme_minimal() +
+  labs(title = " ",
+       x = " ",
+       y = " ",
+       fill = "F-statistics") +
+  theme(axis.text.x = element_text(vjust = 1, size = 18, face = "bold"), axis.text.y = element_text(size = 20,face = "bold"),
+      legend.key.height = unit(1.2, "cm"), 
+    legend.key.width = unit(0.7, "cm"),
+    legend.title = element_text(size = 20),  
+    legend.text = element_text(size = 20))
+
+ggsave("~/Desktop/dmri_heatmap.png", p_dmri, width = 8, height = 8)
+```
+
+

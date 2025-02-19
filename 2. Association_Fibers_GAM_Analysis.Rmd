@@ -1,0 +1,531 @@
+---
+title: "dMRI_GAM_Analysis"
+author: "Neslihan Yildiz Ozhan"
+date: "2024-12-10"
+output: html_document
+---
+
+```{r, COI Overall ~ dMRI}
+library(mgcv)
+library(dplyr)
+library(openxlsx)
+
+data <- read.csv("~/Desktop/abcd_coi.csv")
+
+data <- data %>%
+  mutate(
+    across(ends_with("_Ten1_FA"), scale),
+    across(starts_with("nih"), scale),
+    across(starts_with("coi"), scale)
+  )
+
+unique_values <- sapply(data[c('coi_total_raw', 'interview_age', 'rel_family_id', 'bmi', 'parenteducation', 'dmri_meanmotion')], function(x) length(unique(x)))
+# Determine the maximum possible k value
+max_possible_k <- min(unique_values) - 1
+cat("Maximum possible k value:", max_possible_k, "\n")
+k_values <- 3:max_possible_k
+
+association_fibers <- c('AF_left_Ten1_FA', 'AF_right_Ten1_FA', 'CB_left_Ten1_FA', 'CB_right_Ten1_FA', 'EmC_left_Ten1_FA','EmC_right_Ten1_FA', 'ILF_left_Ten1_FA', 'ILF_right_Ten1_FA', 'IOFF_left_Ten1_FA', 'IOFF_right_Ten1_FA','MdLF_left_Ten1_FA', 'MdLF_right_Ten1_FA', 'SLF_I_left_Ten1_FA', 'SLF_I_right_Ten1_FA', 'SLF_II_left_Ten1_FA', 'SLF_II_right_Ten1_FA', 'SLF_III_left_Ten1_FA', 'SLF_III_right_Ten1_FA','UF_left_Ten1_FA', 'UF_right_Ten1_FA')
+
+
+fit_gam_and_adjust_p <- function(y_column) {
+  models <- list()
+  aic_values <- numeric()
+  p_values <- list()
+  smoothed_terms <- list()
+  
+  for (k in k_values) {
+    fit <- gam(as.formula(paste(y_column, "~ s(coi_total_raw, k = k) + s(interview_age, k = k) + factor(sex) + factor(race) + factor(ethnicity) + factor(totalincome) + s(parenteducation, k = k) + s(bmi, k=k) + factor(puberty_stage) + factor(sleep_category) + factor(fam_hx)+ s(rel_family_id, k = k) + s(dmri_meanmotion, k=k)")),
+               data = data)
+    
+    models[[as.character(k)]] <- fit
+    aic_values[k] <- AIC(fit)
+  }
+  
+  
+  best_k <- which.min(aic_values[k_values])
+  best_model <- models[[as.character(best_k)]]
+  
+  best_model_summary <- summary(best_model)
+  if ("s.table" %in% names(best_model_summary)) {
+    smoothed_p_values <- best_model_summary$s.table[, 4]
+    smoothed_terms <- rownames(best_model_summary$s.table)
+  } else {
+    smoothed_p_values <- NA
+    smoothed_terms <- NA
+  }
+  
+
+  list(
+    best_model = best_model,
+    best_k = best_k,
+    aic_values = aic_values,
+    p_values = smoothed_p_values,
+    smoothed_terms = smoothed_terms
+  )
+}
+
+
+best_models <- list()
+best_ks <- list()
+aic_values_all <- list()
+p_values_all <- list()
+smoothed_terms_all <- list()
+
+# Loop over each "association fiber" column
+for (fiber_col in association_fibers) {
+  result <- fit_gam_and_adjust_p(fiber_col)
+  
+  # Store the results
+  best_models[[fiber_col]] <- result$best_model
+  best_ks[[fiber_col]] <- result$best_k
+  aic_values_all[[fiber_col]] <- result$aic_values
+  p_values_all[[fiber_col]] <- result$p_values
+  smoothed_terms_all[[fiber_col]] <- result$smoothed_terms
+  
+  cat("Column:", fiber_col, "\n")
+  cat("Best k:", result$best_k, "\n")
+  cat("AIC of the best model:", AIC(result$best_model), "\n")
+  
+  # Check the model diagnostics for the best model
+  gam.check(result$best_model)
+  
+  # Print the summary of the best model
+  print(summary(result$best_model))
+}
+
+all_p_values <- unlist(p_values_all)
+fdr_corrected_p_values <- p.adjust(all_p_values, method = "fdr")
+
+
+corrected_p_values_list <- split(fdr_corrected_p_values, rep(association_fibers, lengths(p_values_all)))
+
+
+corrected_pvalues_coi_total_raw <- data.frame(
+  Column = rep(association_fibers, lengths(p_values_all)),
+  Term = unlist(smoothed_terms_all),
+  CorrectedPValue = fdr_corrected_p_values
+) %>%
+  filter(Term == "s(coi_total_raw)")
+
+
+results_df_dmri <- data.frame(
+  Column = character(),
+  AdjR2 = numeric(),
+  DevExp = numeric(),
+  FStatistic = numeric(),
+  PValue = numeric(),
+  CorrectedPValue = numeric(),
+  stringsAsFactors = FALSE
+)
+
+
+for (fiber_col in association_fibers) {
+  best_model <- best_models[[fiber_col]]
+  
+  if (!is.null(best_model)) {
+    best_model_summary <- summary(best_model)
+    # Extract adjusted R-squared
+    adj_r2 <- best_model_summary$r.sq
+    # Extract deviance explained
+    dev_exp <- best_model_summary$dev.expl
+    # Find the index of the coi_total_raw term in the summary
+    term_index <- which(rownames(best_model_summary$s.table) == "s(coi_total_raw)")
+    
+    if (length(term_index) > 0) {
+      # Extract F-statistic and p-value for coi_total_raw
+      f_statistic <- best_model_summary$s.table[term_index, "F"]
+      p_value <- best_model_summary$s.table[term_index, "p-value"]
+      
+      # Get the FDR corrected p-value for the current association fiber and "s(coi_total_raw)"
+      corrected_p_value <- corrected_pvalues_coi_total_raw %>%
+        filter(Column == fiber_col) %>%
+        pull(CorrectedPValue)
+      
+      # Append the results to the data frame
+      results_df_dmri <- results_df_dmri %>% add_row(
+        Column = fiber_col,
+        AdjR2 = adj_r2,
+        DevExp = dev_exp,
+        FStatistic = f_statistic,
+        PValue = p_value,
+        CorrectedPValue = corrected_p_value
+      )
+    }
+  }
+}
+
+write.xlsx(results_df_dmri, "~/Desktop/results_dmri_coi_overall.xlsx", rowNames = FALSE)
+
+```
+
+```{r, COI ed ~ dMRI}
+
+
+fit_gam_and_adjust_p <- function(y_column) {
+  models <- list()
+  aic_values <- numeric()
+  p_values <- list()
+  smoothed_terms <- list()
+  
+  for (k in k_values) {
+    fit <- gam(as.formula(paste(y_column, "~ s(coi_ed_raw, k = k) + s(interview_age, k = k) + factor(sex) + factor(race) + factor(ethnicity) + factor(totalincome) + s(parenteducation, k = k) + s(bmi, k=k) + factor(puberty_stage) + factor(sleep_category) + factor(fam_hx)+ s(rel_family_id, k = k) + s(dmri_meanmotion, k=k)")),
+               data = data)
+    
+ 
+    models[[as.character(k)]] <- fit
+    aic_values[k] <- AIC(fit)
+  }
+  
+  best_k <- which.min(aic_values[k_values])
+  best_model <- models[[as.character(best_k)]]
+  
+  best_model_summary <- summary(best_model)
+  if ("s.table" %in% names(best_model_summary)) {
+    smoothed_p_values <- best_model_summary$s.table[, 4]
+    smoothed_terms <- rownames(best_model_summary$s.table)
+  } else {
+    smoothed_p_values <- NA
+    smoothed_terms <- NA
+  }
+  
+  list(
+    best_model = best_model,
+    best_k = best_k,
+    aic_values = aic_values,
+    p_values = smoothed_p_values,
+    smoothed_terms = smoothed_terms
+  )
+}
+
+best_models <- list()
+best_ks <- list()
+aic_values_all <- list()
+p_values_all <- list()
+smoothed_terms_all <- list()
+
+for (fiber_col in association_fibers) {
+  result <- fit_gam_and_adjust_p(fiber_col)
+
+  best_models[[fiber_col]] <- result$best_model
+  best_ks[[fiber_col]] <- result$best_k
+  aic_values_all[[fiber_col]] <- result$aic_values
+  p_values_all[[fiber_col]] <- result$p_values
+  smoothed_terms_all[[fiber_col]] <- result$smoothed_terms
+  
+  cat("Column:", fiber_col, "\n")
+  cat("Best k:", result$best_k, "\n")
+  cat("AIC of the best model:", AIC(result$best_model), "\n")
+  
+  # Check the model diagnostics for the best model
+  gam.check(result$best_model)
+  
+  # Print the summary of the best model
+  print(summary(result$best_model))
+}
+
+all_p_values <- unlist(p_values_all)
+fdr_corrected_p_values <- p.adjust(all_p_values, method = "fdr")
+
+
+corrected_p_values_list <- split(fdr_corrected_p_values, rep(association_fibers, lengths(p_values_all)))
+
+# Extract and save the corrected p-values for coi_total_raw
+corrected_pvalues_coi_ed_raw <- data.frame(
+  Column = rep(association_fibers, lengths(p_values_all)),
+  Term = unlist(smoothed_terms_all),
+  CorrectedPValue = fdr_corrected_p_values
+) %>%
+  filter(Term == "s(coi_ed_raw)")
+
+
+results_df_dmri_ed <- data.frame(
+  Column = character(),
+  AdjR2 = numeric(),
+  DevExp = numeric(),
+  FStatistic = numeric(),
+  PValue = numeric(),
+  CorrectedPValue = numeric(),
+  stringsAsFactors = FALSE
+)
+
+for (fiber_col in association_fibers) {
+  best_model <- best_models[[fiber_col]]
+  
+  if (!is.null(best_model)) {
+    best_model_summary <- summary(best_model)
+    # Extract adjusted R-squared
+    adj_r2 <- best_model_summary$r.sq
+    # Extract deviance explained
+    dev_exp <- best_model_summary$dev.expl
+    # Find the index of the coi_total_raw term in the summary
+    term_index <- which(rownames(best_model_summary$s.table) == "s(coi_ed_raw)")
+    
+    if (length(term_index) > 0) {
+      # Extract F-statistic and p-value for coi_total_raw
+      f_statistic <- best_model_summary$s.table[term_index, "F"]
+      p_value <- best_model_summary$s.table[term_index, "p-value"]
+      # Get the FDR corrected p-value for the current association fiber and "s(coi_total_raw)"
+      corrected_p_value <- corrected_pvalues_coi_ed_raw %>%
+        filter(Column == fiber_col) %>%
+        pull(CorrectedPValue)
+
+      results_df_dmri_ed <- results_df_dmri_ed %>% add_row(
+        Column = fiber_col,
+        AdjR2 = adj_r2,
+        DevExp = dev_exp,
+        FStatistic = f_statistic,
+        PValue = p_value,
+        CorrectedPValue = corrected_p_value
+      )
+    }
+  }
+}
+write.xlsx(results_df_dmri_ed, "~/Desktop/results_dmri_coi_ed.xlsx", rowNames = FALSE)
+```
+
+```{r, COI SE ˆ dMRI}
+
+fit_gam_and_adjust_p <- function(y_column) {
+  models <- list()
+  aic_values <- numeric()
+  p_values <- list()
+  smoothed_terms <- list()
+  
+  for (k in k_values) {
+    fit <- gam(as.formula(paste(y_column, "~ s(coi_se_raw, k = k) + s(interview_age, k = k) + factor(sex) + factor(race) + factor(ethnicity) + factor(totalincome) + s(parenteducation, k = k) + s(bmi, k=k) + factor(puberty_stage) + factor(sleep_category) + factor(fam_hx)+ s(rel_family_id, k = k) + s(dmri_meanmotion, k=k)")),
+               data = data)
+  
+    models[[as.character(k)]] <- fit
+    aic_values[k] <- AIC(fit)
+  }
+  
+  best_k <- which.min(aic_values[k_values])
+  best_model <- models[[as.character(best_k)]]
+  
+  best_model_summary <- summary(best_model)
+  if ("s.table" %in% names(best_model_summary)) {
+    smoothed_p_values <- best_model_summary$s.table[, 4]
+    smoothed_terms <- rownames(best_model_summary$s.table)
+  } else {
+    smoothed_p_values <- NA
+    smoothed_terms <- NA
+  }
+  
+  list(
+    best_model = best_model,
+    best_k = best_k,
+    aic_values = aic_values,
+    p_values = smoothed_p_values,
+    smoothed_terms = smoothed_terms
+  )
+}
+
+best_models <- list()
+best_ks <- list()
+aic_values_all <- list()
+p_values_all <- list()
+smoothed_terms_all <- list()
+
+for (fiber_col in association_fibers) {
+  result <- fit_gam_and_adjust_p(fiber_col)
+  best_models[[fiber_col]] <- result$best_model
+  best_ks[[fiber_col]] <- result$best_k
+  aic_values_all[[fiber_col]] <- result$aic_values
+  p_values_all[[fiber_col]] <- result$p_values
+  smoothed_terms_all[[fiber_col]] <- result$smoothed_terms
+  
+  cat("Column:", fiber_col, "\n")
+  cat("Best k:", result$best_k, "\n")
+  cat("AIC of the best model:", AIC(result$best_model), "\n")
+  
+  # Check the model diagnostics for the best model
+  gam.check(result$best_model)
+  
+  # Print the summary of the best model
+  print(summary(result$best_model))
+}
+all_p_values <- unlist(p_values_all)
+fdr_corrected_p_values <- p.adjust(all_p_values, method = "fdr")
+corrected_p_values_list <- split(fdr_corrected_p_values, rep(association_fibers, lengths(p_values_all)))
+
+corrected_pvalues_coi_se_raw <- data.frame(
+  Column = rep(association_fibers, lengths(p_values_all)),
+  Term = unlist(smoothed_terms_all),
+  CorrectedPValue = fdr_corrected_p_values
+) %>%
+  filter(Term == "s(coi_se_raw)")
+
+results_df_dmri_se <- data.frame(
+  Column = character(),
+  AdjR2 = numeric(),
+  DevExp = numeric(),
+  FStatistic = numeric(),
+  PValue = numeric(),
+  CorrectedPValue = numeric(),
+  stringsAsFactors = FALSE
+)
+
+for (fiber_col in association_fibers) {
+  best_model <- best_models[[fiber_col]]
+  
+  if (!is.null(best_model)) {
+    best_model_summary <- summary(best_model)
+    # Extract adjusted R-squared
+    adj_r2 <- best_model_summary$r.sq
+    # Extract deviance explained
+    dev_exp <- best_model_summary$dev.expl
+    # Find the index of the coi_total_raw term in the summary
+    term_index <- which(rownames(best_model_summary$s.table) == "s(coi_se_raw)")
+    
+    if (length(term_index) > 0) {
+      # Extract F-statistic and p-value for coi_total_raw
+      f_statistic <- best_model_summary$s.table[term_index, "F"]
+      p_value <- best_model_summary$s.table[term_index, "p-value"]
+      # Get the FDR corrected p-value for the current association fiber and "s(coi_total_raw)"
+      corrected_p_value <- corrected_pvalues_coi_se_raw %>%
+        filter(Column == fiber_col) %>%
+        pull(CorrectedPValue)
+
+      # Append the results to the data frame
+      results_df_dmri_se <- results_df_dmri_se %>% add_row(
+        Column = fiber_col,
+        AdjR2 = adj_r2,
+        DevExp = dev_exp,
+        FStatistic = f_statistic,
+        PValue = p_value,
+        CorrectedPValue = corrected_p_value
+      )
+    }
+  }
+}
+write.xlsx(results_df_dmri_se, "~/Desktop/results_dmri_coi_se.xlsx", rowNames = FALSE)
+```
+
+```{r}
+
+fit_gam_and_adjust_p <- function(y_column) {
+  models <- list()
+  aic_values <- numeric()
+  p_values <- list()
+  smoothed_terms <- list()
+  
+  for (k in k_values) {
+    fit <- gam(as.formula(paste(y_column, "~ s(coi_he_raw, k = k) + s(interview_age, k = k) + factor(sex) + factor(race) + factor(ethnicity) + factor(totalincome) + s(parenteducation, k = k) + s(bmi, k=k) + factor(puberty_stage) + factor(sleep_category) + factor(fam_hx)+ s(rel_family_id, k = k) + s(dmri_meanmotion, k=k)")),
+               data = data)
+    
+    models[[as.character(k)]] <- fit
+    aic_values[k] <- AIC(fit)
+  }
+
+  best_k <- which.min(aic_values[k_values])
+  best_model <- models[[as.character(best_k)]]
+
+  best_model_summary <- summary(best_model)
+  if ("s.table" %in% names(best_model_summary)) {
+    smoothed_p_values <- best_model_summary$s.table[, 4]
+    smoothed_terms <- rownames(best_model_summary$s.table)
+  } else {
+    smoothed_p_values <- NA
+    smoothed_terms <- NA
+  }
+
+  list(
+    best_model = best_model,
+    best_k = best_k,
+    aic_values = aic_values,
+    p_values = smoothed_p_values,
+    smoothed_terms = smoothed_terms
+  )
+}
+
+best_models <- list()
+best_ks <- list()
+aic_values_all <- list()
+p_values_all <- list()
+smoothed_terms_all <- list()
+
+for (fiber_col in association_fibers) {
+  result <- fit_gam_and_adjust_p(fiber_col)
+  
+  best_models[[fiber_col]] <- result$best_model
+  best_ks[[fiber_col]] <- result$best_k
+  aic_values_all[[fiber_col]] <- result$aic_values
+  p_values_all[[fiber_col]] <- result$p_values
+  smoothed_terms_all[[fiber_col]] <- result$smoothed_terms
+
+  cat("Column:", fiber_col, "\n")
+  cat("Best k:", result$best_k, "\n")
+  cat("AIC of the best model:", AIC(result$best_model), "\n")
+  
+  # Check the model diagnostics for the best model
+  gam.check(result$best_model)
+  
+  # Print the summary of the best model
+  print(summary(result$best_model))
+}
+
+all_p_values <- unlist(p_values_all)
+fdr_corrected_p_values <- p.adjust(all_p_values, method = "fdr")
+corrected_p_values_list <- split(fdr_corrected_p_values, rep(association_fibers, lengths(p_values_all)))
+
+
+corrected_pvalues_coi_he_raw <- data.frame(
+  Column = rep(association_fibers, lengths(p_values_all)),
+  Term = unlist(smoothed_terms_all),
+  CorrectedPValue = fdr_corrected_p_values
+) %>%
+  filter(Term == "s(coi_he_raw)")
+
+
+results_df_dmri_he <- data.frame(
+  Column = character(),
+  AdjR2 = numeric(),
+  DevExp = numeric(),
+  FStatistic = numeric(),
+  PValue = numeric(),
+  CorrectedPValue = numeric(),
+  stringsAsFactors = FALSE
+)
+
+
+for (fiber_col in association_fibers) {
+  best_model <- best_models[[fiber_col]]
+  
+  if (!is.null(best_model)) {
+    best_model_summary <- summary(best_model)
+    # Extract adjusted R-squared
+    adj_r2 <- best_model_summary$r.sq
+    # Extract deviance explained
+    dev_exp <- best_model_summary$dev.expl
+    # Find the index of the coi_total_raw term in the summary
+    term_index <- which(rownames(best_model_summary$s.table) == "s(coi_he_raw)")
+    
+    if (length(term_index) > 0) {
+      # Extract F-statistic and p-value for coi_total_raw
+      f_statistic <- best_model_summary$s.table[term_index, "F"]
+      p_value <- best_model_summary$s.table[term_index, "p-value"]
+      # Get the FDR corrected p-value for the current association fiber and "s(coi_total_raw)"
+      corrected_p_value <- corrected_pvalues_coi_he_raw %>%
+        filter(Column == fiber_col) %>%
+        pull(CorrectedPValue)
+
+      # Append the results to the data frame
+      results_df_dmri_he <- results_df_dmri_he %>% add_row(
+        Column = fiber_col,
+        AdjR2 = adj_r2,
+        DevExp = dev_exp,
+        FStatistic = f_statistic,
+        PValue = p_value,
+        CorrectedPValue = corrected_p_value
+      )
+    }
+  }
+}
+write.xlsx(results_df_dmri_he, "~/Desktop/results_dmri_coi_he.xlsx", rowNames = FALSE)
+```
+
+
+
+
+

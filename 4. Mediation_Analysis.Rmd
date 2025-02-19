@@ -1,0 +1,1040 @@
+---
+title: "mediation"
+author: "Neslihan Yildiz Ozhan"
+date: "2024-12-12"
+output: html_document
+---
+
+```{r}
+install.packages("dplyr")
+install.packages("mgcv")
+install.packages("mediation")
+ 
+
+library(mgcv)
+library(mediation)
+library(dplyr)
+```
+
+```{r}
+df <- read.csv("~/Desktop/abcd_coi.csv")
+df <- df %>%
+  mutate(
+    across(ends_with("_Ten1_FA"), scale),
+    across(starts_with("nih"), scale),
+    across(starts_with("coi"), scale)
+  )
+```
+
+
+```{r}
+#COI Overall -> SLF-I left -> Cognition --- Mediation model
+
+fit_and_evaluate_gam <- function(data, response, predictors, smooth_terms, k_values) {
+  results <- list()  
+  
+  for (k in k_values) {
+    smooth_formula <- paste(
+      sapply(smooth_terms, function(term) paste0("s(", term, ", k = ", k, ")")),
+      collapse = " + "
+    )
+    
+
+    full_formula <- paste(response, "~", smooth_formula, "+", paste(predictors, collapse = " + "))
+    
+    # Fit the GAM model
+    gam_model <- gam(as.formula(full_formula), data = data)
+    
+    results[[paste("k =", k)]] <- list(model = gam_model, AIC = AIC(gam_model))
+  }
+  
+
+  best_k <- as.numeric(gsub("k = ", "", names(which.min(sapply(results, function(x) x$AIC)))))
+  best_model <- results[[paste("k =", best_k)]]$model
+  
+  return(list(best_model = best_model, best_k = best_k, all_results = results))
+}
+
+k_values <- seq(3, 11, by = 1)
+
+
+mediator_smooth_terms <- c("coi_total_raw", "interview_age", "parenteducation", "bmi", "rel_family_id", "dmri_meanmotion")
+mediator_linear_predictors <- c(
+  "factor(sex)", "factor(race)", "factor(ethnicity)", "factor(totalincome)",
+  "factor(puberty_stage)", "factor(sleep_category)", "factor(fam_hx)"
+)
+
+outcome_smooth_terms <- c("SLF_I_left_Ten1_FA", "coi_total_raw", "interview_age", "parenteducation", "bmi", "rel_family_id", "dmri_meanmotion")
+outcome_linear_predictors <- c(
+  "factor(sex)", "factor(race)", "factor(ethnicity)", "factor(totalincome)",
+  "factor(puberty_stage)", "factor(sleep_category)", "factor(fam_hx)", "factor(site_id_l)"
+)
+
+total_effect_smooth_terms <- c("coi_total_raw", "interview_age", "parenteducation", "bmi", "rel_family_id")
+total_effect_linear_predictors <- c(
+  "factor(sex)", "factor(race)", "factor(ethnicity)", "factor(totalincome)",
+  "factor(puberty_stage)", "factor(sleep_category)", "factor(fam_hx)", "factor(site_id_l)"
+)
+
+# Initialize lists to store results
+all_results <- list()
+all_bootstrap_results <- list()
+
+# Get all cognition outcome columns starting with "nihtbx_"
+cognition_outcomes <- grep("^nihtbx_", names(df), value = TRUE)
+
+# Process each cognition outcome
+for (cognition_col in cognition_outcomes) {
+  cat("Processing:", cognition_col, "\n")
+  
+  # Step 1: Mediator Model (FA ~ COI + Covariates + dmri_meanmotion)
+  mediator_results <- fit_and_evaluate_gam(
+    data = df,
+    response = "SLF_I_left_Ten1_FA",
+    predictors = mediator_linear_predictors,
+    smooth_terms = mediator_smooth_terms,
+    k_values = k_values
+  )
+  best_mediator_model <- mediator_results$best_model
+  best_k_mediator <- mediator_results$best_k
+  
+  # Print summary for the mediator model
+  cat("\n--- Summary for Mediator Model (FA ~ COI) ---\n")
+  print(summary(best_mediator_model))
+  cat("Best k for Mediator Model:", best_k_mediator, "\n")
+  
+  # Step 2: Outcome Model (Cognition ~ FA + COI + Covariates)
+  outcome_results <- fit_and_evaluate_gam(
+    data = df,
+    response = cognition_col,
+    predictors = outcome_linear_predictors,
+    smooth_terms = outcome_smooth_terms,
+    k_values = k_values
+  )
+  best_outcome_model <- outcome_results$best_model
+  best_k_outcome <- outcome_results$best_k
+  
+  # Print summary for the outcome model
+  cat("\n--- Summary for Outcome Model (Cognition ~ FA + COI) ---\n")
+  print(summary(best_outcome_model))
+  cat("Best k for Outcome Model:", best_k_outcome, "\n")
+  
+  # Step 3: Total Effect Model (Cognition ~ COI + Covariates)
+  total_effect_results <- fit_and_evaluate_gam(
+    data = df,
+    response = cognition_col,
+    predictors = total_effect_linear_predictors,
+    smooth_terms = total_effect_smooth_terms,
+    k_values = k_values
+  )
+  best_total_effect_model <- total_effect_results$best_model
+  best_k_total_effect <- total_effect_results$best_k
+  
+  # Print summary for the total effect model
+  cat("\n--- Summary for Total Effect Model (Cognition ~ COI + Covariates) ---\n")
+  print(summary(best_total_effect_model))
+  cat("Best k for Total Effect Model:", best_k_total_effect, "\n")
+  
+  # Step 4: Predict Mediator (FA) and Outcome (Cognition)
+  df$M_pred <- predict(best_mediator_model, newdata = df)  # Predicted FA
+  df$Y_pred <- predict(best_outcome_model, newdata = df)   # Predicted Cognition
+  
+  # Step 5: Compute Indirect Effect using Linear Regression
+  indirect_effect <- lm(Y_pred ~ M_pred, data = df)
+  indirect_effect_coefficient <- coef(indirect_effect)[2]
+  
+  # Step 6: Compute Mediation Proportion
+  total_effect <- summary(best_total_effect_model)$s.table["s(coi_total_raw)", "F"]
+  mediation_proportion <- indirect_effect_coefficient / total_effect
+  
+  # Step 7: Bootstrapping for Confidence Intervals
+  set.seed(123)
+  bootstrap_results <- replicate(1000, {
+    sample_indices <- sample(nrow(df), replace = TRUE)
+    df_sample <- df[sample_indices, ]
+    
+    mediator_model <- gam(
+      SLF_I_left_Ten1_FA ~ s(coi_total_raw, k = best_k_mediator) + 
+        s(interview_age, k = best_k_mediator) + s(dmri_meanmotion, k = best_k_mediator) +
+        factor(sex) + factor(race) + factor(ethnicity) + factor(totalincome) +
+        s(parenteducation, k = best_k_mediator) + s(bmi, k = best_k_mediator) +
+        factor(puberty_stage) + factor(sleep_category) + factor(fam_hx) +
+        s(rel_family_id, k = best_k_mediator),
+      data = df_sample
+    )
+
+    outcome_model <- gam(
+      as.formula(paste(cognition_col, "~ s(SLF_I_left_Ten1_FA, k =", best_k_outcome, ") +",
+                       "s(coi_total_raw, k =", best_k_outcome, ") +",
+                       "s(interview_age, k =", best_k_outcome, ") +",
+                       "s(parenteducation, k =", best_k_outcome, ") +",
+                       "factor(sex) + factor(race) + factor(ethnicity) + factor(totalincome) +",
+                       "factor(puberty_stage) + factor(sleep_category) + factor(fam_hx) +",
+                       "factor(site_id_l) + s(rel_family_id, k =", best_k_outcome, ")")),
+      data = df_sample
+    )
+    
+    M_pred <- predict(mediator_model, newdata = df_sample)
+    Y_pred <- predict(outcome_model, newdata = df_sample)
+    
+
+    coef(lm(Y_pred ~ M_pred, data = df_sample))[2]
+  })
+  
+
+  mean_indirect_effect <- mean(bootstrap_results)
+  ci_indirect_effect <- quantile(bootstrap_results, c(0.025, 0.975))
+  
+  all_results[[cognition_col]] <- list(
+    mediator_model = best_mediator_model,
+    outcome_model = best_outcome_model,
+    total_effect_model = best_total_effect_model,
+    best_k_mediator = best_k_mediator,
+    best_k_outcome = best_k_outcome,
+    best_k_total_effect = best_k_total_effect,
+    indirect_effect = list(coefficient = indirect_effect_coefficient,
+                           mean = mean_indirect_effect,
+                           ci = ci_indirect_effect),
+    mediation_proportion = mediation_proportion
+  )
+  all_bootstrap_results[[cognition_col]] <- list(mean = mean_indirect_effect, ci = ci_indirect_effect)
+}
+
+indirect_effects <- data.frame(
+  Cognition_Outcome = cognition_outcomes,
+  Indirect_Effect = sapply(all_bootstrap_results, function(x) x$mean),
+  CI_Lower = sapply(all_bootstrap_results, function(x) x$ci[1]),
+  CI_Upper = sapply(all_bootstrap_results, function(x) x$ci[2]),
+  Mediation_Proportion = sapply(all_results, function(x) x$mediation_proportion)
+)
+
+print(indirect_effects)
+```
+
+
+
+```{r}
+#COI ED -> SLF-I left -> Cognition --- Mediation model
+
+mediator_smooth_terms <- c("coi_ed_raw", "interview_age", "parenteducation", "bmi", "rel_family_id", "dmri_meanmotion")
+mediator_linear_predictors <- c(
+  "factor(sex)", "factor(race)", "factor(ethnicity)", "factor(totalincome)",
+  "factor(puberty_stage)", "factor(sleep_category)", "factor(fam_hx)"
+)
+
+outcome_smooth_terms <- c("SLF_I_left_Ten1_FA", "coi_ed_raw", "interview_age", "parenteducation", "bmi", "rel_family_id", "dmri_meanmotion")
+outcome_linear_predictors <- c(
+  "factor(sex)", "factor(race)", "factor(ethnicity)", "factor(totalincome)",
+  "factor(puberty_stage)", "factor(sleep_category)", "factor(fam_hx)", "factor(site_id_l)"
+)
+
+total_effect_smooth_terms <- c("coi_ed_raw", "interview_age", "parenteducation", "bmi", "rel_family_id")
+total_effect_linear_predictors <- c(
+  "factor(sex)", "factor(race)", "factor(ethnicity)", "factor(totalincome)",
+  "factor(puberty_stage)", "factor(sleep_category)", "factor(fam_hx)", "factor(site_id_l)"
+)
+
+
+all_results <- list()
+all_bootstrap_results <- list()
+
+cognition_outcomes <- grep("^nihtbx_", names(df), value = TRUE)
+
+
+for (cognition_col in cognition_outcomes) {
+  cat("Processing:", cognition_col, "\n")
+  
+  # Step 1: Mediator Model (FA ~ COI + Covariates + dmri_meanmotion)
+  mediator_results <- fit_and_evaluate_gam(
+    data = df,
+    response = "SLF_I_left_Ten1_FA",
+    predictors = mediator_linear_predictors,
+    smooth_terms = mediator_smooth_terms,
+    k_values = k_values
+  )
+  best_mediator_model <- mediator_results$best_model
+  best_k_mediator <- mediator_results$best_k
+  
+  # Print summary for the mediator model
+  cat("\n--- Summary for Mediator Model (FA ~ COI) ---\n")
+  print(summary(best_mediator_model))
+  cat("Best k for Mediator Model:", best_k_mediator, "\n")
+  
+  # Step 2: Outcome Model (Cognition ~ FA + COI + Covariates)
+  outcome_results <- fit_and_evaluate_gam(
+    data = df,
+    response = cognition_col,
+    predictors = outcome_linear_predictors,
+    smooth_terms = outcome_smooth_terms,
+    k_values = k_values
+  )
+  best_outcome_model <- outcome_results$best_model
+  best_k_outcome <- outcome_results$best_k
+  
+  # Print summary for the outcome model
+  cat("\n--- Summary for Outcome Model (Cognition ~ FA + COI) ---\n")
+  print(summary(best_outcome_model))
+  cat("Best k for Outcome Model:", best_k_outcome, "\n")
+  
+  # Step 3: Total Effect Model (Cognition ~ COI + Covariates)
+  total_effect_results <- fit_and_evaluate_gam(
+    data = df,
+    response = cognition_col,
+    predictors = total_effect_linear_predictors,
+    smooth_terms = total_effect_smooth_terms,
+    k_values = k_values
+  )
+  best_total_effect_model <- total_effect_results$best_model
+  best_k_total_effect <- total_effect_results$best_k
+  
+  # Print summary for the total effect model
+  cat("\n--- Summary for Total Effect Model (Cognition ~ COI + Covariates) ---\n")
+  print(summary(best_total_effect_model))
+  cat("Best k for Total Effect Model:", best_k_total_effect, "\n")
+  
+  # Step 4: Predict Mediator (FA) and Outcome (Cognition)
+  df$M_pred <- predict(best_mediator_model, newdata = df)  # Predicted FA
+  df$Y_pred <- predict(best_outcome_model, newdata = df)   # Predicted Cognition
+  
+  # Step 5: Compute Indirect Effect using Linear Regression
+  indirect_effect <- lm(Y_pred ~ M_pred, data = df)
+  indirect_effect_coefficient <- coef(indirect_effect)[2]
+  
+  # Step 6: Compute Mediation Proportion
+  total_effect <- summary(best_total_effect_model)$s.table["s(coi_ed_raw)", "F"]
+  mediation_proportion <- indirect_effect_coefficient / total_effect
+  
+  set.seed(123)
+  bootstrap_results <- replicate(1000, {
+    sample_indices <- sample(nrow(df), replace = TRUE)
+    df_sample <- df[sample_indices, ]
+    
+    mediator_model <- gam(
+      SLF_I_left_Ten1_FA ~ s(coi_ed_raw, k = best_k_mediator) + 
+        s(interview_age, k = best_k_mediator) + s(dmri_meanmotion, k = best_k_mediator) +
+        factor(sex) + factor(race) + factor(ethnicity) + factor(totalincome) +
+        s(parenteducation, k = best_k_mediator) + s(bmi, k = best_k_mediator) +
+        factor(puberty_stage) + factor(sleep_category) + factor(fam_hx) +
+        s(rel_family_id, k = best_k_mediator),
+      data = df_sample
+    )
+    
+    outcome_model <- gam(
+      as.formula(paste(cognition_col, "~ s(SLF_I_left_Ten1_FA, k =", best_k_outcome, ") +",
+                       "s(coi_ed_raw, k =", best_k_outcome, ") +",
+                       "s(interview_age, k =", best_k_outcome, ") +",
+                       "s(parenteducation, k =", best_k_outcome, ") +",
+                       "factor(sex) + factor(race) + factor(ethnicity) + factor(totalincome) +",
+                       "factor(puberty_stage) + factor(sleep_category) + factor(fam_hx) +",
+                       "factor(site_id_l) + s(rel_family_id, k =", best_k_outcome, ")")),
+      data = df_sample
+    )
+    
+
+    M_pred <- predict(mediator_model, newdata = df_sample)
+    Y_pred <- predict(outcome_model, newdata = df_sample)
+    
+    coef(lm(Y_pred ~ M_pred, data = df_sample))[2]
+  })
+  
+  mean_indirect_effect <- mean(bootstrap_results)
+  ci_indirect_effect <- quantile(bootstrap_results, c(0.025, 0.975))
+  
+
+  all_results[[cognition_col]] <- list(
+    mediator_model = best_mediator_model,
+    outcome_model = best_outcome_model,
+    total_effect_model = best_total_effect_model,
+    best_k_mediator = best_k_mediator,
+    best_k_outcome = best_k_outcome,
+    best_k_total_effect = best_k_total_effect,
+    indirect_effect = list(coefficient = indirect_effect_coefficient,
+                           mean = mean_indirect_effect,
+                           ci = ci_indirect_effect),
+    mediation_proportion = mediation_proportion
+  )
+  all_bootstrap_results[[cognition_col]] <- list(mean = mean_indirect_effect, ci = ci_indirect_effect)
+}
+
+
+indirect_effects <- data.frame(
+  Cognition_Outcome = cognition_outcomes,
+  Indirect_Effect = sapply(all_bootstrap_results, function(x) x$mean),
+  CI_Lower = sapply(all_bootstrap_results, function(x) x$ci[1]),
+  CI_Upper = sapply(all_bootstrap_results, function(x) x$ci[2]),
+  Mediation_Proportion = sapply(all_results, function(x) x$mediation_proportion)
+)
+
+print(indirect_effects)
+
+```
+
+
+```{r}
+#COI SE -> SLF-I left -> Cognition --- Mediation model
+
+mediator_smooth_terms <- c("coi_se_raw", "interview_age", "parenteducation", "bmi", "rel_family_id", "dmri_meanmotion")
+mediator_linear_predictors <- c(
+  "factor(sex)", "factor(race)", "factor(ethnicity)", "factor(totalincome)",
+  "factor(puberty_stage)", "factor(sleep_category)", "factor(fam_hx)"
+)
+
+outcome_smooth_terms <- c("SLF_I_left_Ten1_FA", "coi_se_raw", "interview_age", "parenteducation", "bmi", "rel_family_id", "dmri_meanmotion")
+outcome_linear_predictors <- c(
+  "factor(sex)", "factor(race)", "factor(ethnicity)", "factor(totalincome)",
+  "factor(puberty_stage)", "factor(sleep_category)", "factor(fam_hx)", "factor(site_id_l)"
+)
+
+total_effect_smooth_terms <- c("coi_se_raw", "interview_age", "parenteducation", "bmi", "rel_family_id")
+total_effect_linear_predictors <- c(
+  "factor(sex)", "factor(race)", "factor(ethnicity)", "factor(totalincome)",
+  "factor(puberty_stage)", "factor(sleep_category)", "factor(fam_hx)", "factor(site_id_l)"
+)
+
+all_results <- list()
+all_bootstrap_results <- list()
+
+cognition_outcomes <- grep("^nihtbx_", names(df), value = TRUE)
+
+
+for (cognition_col in cognition_outcomes) {
+  cat("Processing:", cognition_col, "\n")
+  
+  # Step 1: Mediator Model (FA ~ COI + Covariates + dmri_meanmotion)
+  mediator_results <- fit_and_evaluate_gam(
+    data = df,
+    response = "SLF_I_left_Ten1_FA",
+    predictors = mediator_linear_predictors,
+    smooth_terms = mediator_smooth_terms,
+    k_values = k_values
+  )
+  best_mediator_model <- mediator_results$best_model
+  best_k_mediator <- mediator_results$best_k
+  
+  # Print summary for the mediator model
+  cat("\n--- Summary for Mediator Model (FA ~ COI) ---\n")
+  print(summary(best_mediator_model))
+  cat("Best k for Mediator Model:", best_k_mediator, "\n")
+  
+  # Step 2: Outcome Model (Cognition ~ FA + COI + Covariates)
+  outcome_results <- fit_and_evaluate_gam(
+    data = df,
+    response = cognition_col,
+    predictors = outcome_linear_predictors,
+    smooth_terms = outcome_smooth_terms,
+    k_values = k_values
+  )
+  best_outcome_model <- outcome_results$best_model
+  best_k_outcome <- outcome_results$best_k
+  
+  # Print summary for the outcome model
+  cat("\n--- Summary for Outcome Model (Cognition ~ FA + COI) ---\n")
+  print(summary(best_outcome_model))
+  cat("Best k for Outcome Model:", best_k_outcome, "\n")
+  
+  # Step 3: Total Effect Model (Cognition ~ COI + Covariates)
+  total_effect_results <- fit_and_evaluate_gam(
+    data = df,
+    response = cognition_col,
+    predictors = total_effect_linear_predictors,
+    smooth_terms = total_effect_smooth_terms,
+    k_values = k_values
+  )
+  best_total_effect_model <- total_effect_results$best_model
+  best_k_total_effect <- total_effect_results$best_k
+  
+  # Print summary for the total effect model
+  cat("\n--- Summary for Total Effect Model (Cognition ~ COI + Covariates) ---\n")
+  print(summary(best_total_effect_model))
+  cat("Best k for Total Effect Model:", best_k_total_effect, "\n")
+  
+  # Step 4: Predict Mediator (FA) and Outcome (Cognition)
+  df$M_pred <- predict(best_mediator_model, newdata = df)  # Predicted FA
+  df$Y_pred <- predict(best_outcome_model, newdata = df)   # Predicted Cognition
+  
+  # Step 5: Compute Indirect Effect using Linear Regression
+  indirect_effect <- lm(Y_pred ~ M_pred, data = df)
+  indirect_effect_coefficient <- coef(indirect_effect)[2]
+  
+  # Step 6: Compute Mediation Proportion
+  total_effect <- summary(best_total_effect_model)$s.table["s(coi_se_raw)", "F"]
+  mediation_proportion <- indirect_effect_coefficient / total_effect
+  
+  # Step 7: Bootstrapping for Confidence Intervals
+  set.seed(123)
+  bootstrap_results <- replicate(1000, {
+    sample_indices <- sample(nrow(df), replace = TRUE)
+    df_sample <- df[sample_indices, ]
+    
+    mediator_model <- gam(
+      SLF_I_left_Ten1_FA ~ s(coi_se_raw, k = best_k_mediator) + 
+        s(interview_age, k = best_k_mediator) + s(dmri_meanmotion, k = best_k_mediator) +
+        factor(sex) + factor(race) + factor(ethnicity) + factor(totalincome) +
+        s(parenteducation, k = best_k_mediator) + s(bmi, k = best_k_mediator) +
+        factor(puberty_stage) + factor(sleep_category) + factor(fam_hx) +
+        s(rel_family_id, k = best_k_mediator),
+      data = df_sample
+    )
+    
+    outcome_model <- gam(
+      as.formula(paste(cognition_col, "~ s(SLF_I_left_Ten1_FA, k =", best_k_outcome, ") +",
+                       "s(coi_se_raw, k =", best_k_outcome, ") +",
+                       "s(interview_age, k =", best_k_outcome, ") +",
+                       "s(parenteducation, k =", best_k_outcome, ") +",
+                       "factor(sex) + factor(race) + factor(ethnicity) + factor(totalincome) +",
+                       "factor(puberty_stage) + factor(sleep_category) + factor(fam_hx) +",
+                       "factor(site_id_l) + s(rel_family_id, k =", best_k_outcome, ")")),
+      data = df_sample
+    )
+    
+
+    M_pred <- predict(mediator_model, newdata = df_sample)
+    Y_pred <- predict(outcome_model, newdata = df_sample)
+    
+
+    coef(lm(Y_pred ~ M_pred, data = df_sample))[2]
+  })
+  
+
+  mean_indirect_effect <- mean(bootstrap_results)
+  ci_indirect_effect <- quantile(bootstrap_results, c(0.025, 0.975))
+  
+  all_results[[cognition_col]] <- list(
+    mediator_model = best_mediator_model,
+    outcome_model = best_outcome_model,
+    total_effect_model = best_total_effect_model,
+    best_k_mediator = best_k_mediator,
+    best_k_outcome = best_k_outcome,
+    best_k_total_effect = best_k_total_effect,
+    indirect_effect = list(coefficient = indirect_effect_coefficient,
+                           mean = mean_indirect_effect,
+                           ci = ci_indirect_effect),
+    mediation_proportion = mediation_proportion
+  )
+  all_bootstrap_results[[cognition_col]] <- list(mean = mean_indirect_effect, ci = ci_indirect_effect)
+}
+
+indirect_effects <- data.frame(
+  Cognition_Outcome = cognition_outcomes,
+  Indirect_Effect = sapply(all_bootstrap_results, function(x) x$mean),
+  CI_Lower = sapply(all_bootstrap_results, function(x) x$ci[1]),
+  CI_Upper = sapply(all_bootstrap_results, function(x) x$ci[2]),
+  Mediation_Proportion = sapply(all_results, function(x) x$mediation_proportion)
+)
+
+
+print(indirect_effects)
+
+```
+
+```{r}
+#COI SE -> SLF-I left -> Cognition --- Mediation model
+
+mediator_smooth_terms <- c("coi_he_raw", "interview_age", "parenteducation", "bmi", "rel_family_id", "dmri_meanmotion")
+mediator_linear_predictors <- c(
+  "factor(sex)", "factor(race)", "factor(ethnicity)", "factor(totalincome)",
+  "factor(puberty_stage)", "factor(sleep_category)", "factor(fam_hx)"
+)
+
+outcome_smooth_terms <- c("SLF_I_left_Ten1_FA", "coi_he_raw", "interview_age", "parenteducation", "bmi", "rel_family_id", "dmri_meanmotion")
+outcome_linear_predictors <- c(
+  "factor(sex)", "factor(race)", "factor(ethnicity)", "factor(totalincome)",
+  "factor(puberty_stage)", "factor(sleep_category)", "factor(fam_hx)", "factor(site_id_l)"
+)
+
+total_effect_smooth_terms <- c("coi_he_raw", "interview_age", "parenteducation", "bmi", "rel_family_id")
+total_effect_linear_predictors <- c(
+  "factor(sex)", "factor(race)", "factor(ethnicity)", "factor(totalincome)",
+  "factor(puberty_stage)", "factor(sleep_category)", "factor(fam_hx)", "factor(site_id_l)"
+)
+
+all_results <- list()
+all_bootstrap_results <- list()
+
+cognition_outcomes <- grep("^nihtbx_", names(df), value = TRUE)
+
+for (cognition_col in cognition_outcomes) {
+  cat("Processing:", cognition_col, "\n")
+  
+  # Step 1: Mediator Model (FA ~ COI + Covariates + dmri_meanmotion)
+  mediator_results <- fit_and_evaluate_gam(
+    data = df,
+    response = "SLF_I_left_Ten1_FA",
+    predictors = mediator_linear_predictors,
+    smooth_terms = mediator_smooth_terms,
+    k_values = k_values
+  )
+  best_mediator_model <- mediator_results$best_model
+  best_k_mediator <- mediator_results$best_k
+  
+  # Print summary for the mediator model
+  cat("\n--- Summary for Mediator Model (FA ~ COI) ---\n")
+  print(summary(best_mediator_model))
+  cat("Best k for Mediator Model:", best_k_mediator, "\n")
+  
+  # Step 2: Outcome Model (Cognition ~ FA + COI + Covariates)
+  outcome_results <- fit_and_evaluate_gam(
+    data = df,
+    response = cognition_col,
+    predictors = outcome_linear_predictors,
+    smooth_terms = outcome_smooth_terms,
+    k_values = k_values
+  )
+  best_outcome_model <- outcome_results$best_model
+  best_k_outcome <- outcome_results$best_k
+  
+  # Print summary for the outcome model
+  cat("\n--- Summary for Outcome Model (Cognition ~ FA + COI) ---\n")
+  print(summary(best_outcome_model))
+  cat("Best k for Outcome Model:", best_k_outcome, "\n")
+  
+  # Step 3: Total Effect Model (Cognition ~ COI + Covariates)
+  total_effect_results <- fit_and_evaluate_gam(
+    data = df,
+    response = cognition_col,
+    predictors = total_effect_linear_predictors,
+    smooth_terms = total_effect_smooth_terms,
+    k_values = k_values
+  )
+  best_total_effect_model <- total_effect_results$best_model
+  best_k_total_effect <- total_effect_results$best_k
+  
+  # Print summary for the total effect model
+  cat("\n--- Summary for Total Effect Model (Cognition ~ COI + Covariates) ---\n")
+  print(summary(best_total_effect_model))
+  cat("Best k for Total Effect Model:", best_k_total_effect, "\n")
+  
+  # Step 4: Predict Mediator (FA) and Outcome (Cognition)
+  df$M_pred <- predict(best_mediator_model, newdata = df)  # Predicted FA
+  df$Y_pred <- predict(best_outcome_model, newdata = df)   # Predicted Cognition
+  
+  # Step 5: Compute Indirect Effect using Linear Regression
+  indirect_effect <- lm(Y_pred ~ M_pred, data = df)
+  indirect_effect_coefficient <- coef(indirect_effect)[2]
+  
+  # Step 6: Compute Mediation Proportion
+  total_effect <- summary(best_total_effect_model)$s.table["s(coi_he_raw)", "F"]
+  mediation_proportion <- indirect_effect_coefficient / total_effect
+  
+  # Step 7: Bootstrapping for Confidence Intervals
+  set.seed(123)
+  bootstrap_results <- replicate(1000, {
+    sample_indices <- sample(nrow(df), replace = TRUE)
+    df_sample <- df[sample_indices, ]
+    
+    mediator_model <- gam(
+      SLF_I_left_Ten1_FA ~ s(coi_he_raw, k = best_k_mediator) + 
+        s(interview_age, k = best_k_mediator) + s(dmri_meanmotion, k = best_k_mediator) +
+        factor(sex) + factor(race) + factor(ethnicity) + factor(totalincome) +
+        s(parenteducation, k = best_k_mediator) + s(bmi, k = best_k_mediator) +
+        factor(puberty_stage) + factor(sleep_category) + factor(fam_hx) +
+        s(rel_family_id, k = best_k_mediator),
+      data = df_sample
+    )
+
+    outcome_model <- gam(
+      as.formula(paste(cognition_col, "~ s(SLF_I_left_Ten1_FA, k =", best_k_outcome, ") +",
+                       "s(coi_he_raw, k =", best_k_outcome, ") +",
+                       "s(interview_age, k =", best_k_outcome, ") +",
+                       "s(parenteducation, k =", best_k_outcome, ") +",
+                       "factor(sex) + factor(race) + factor(ethnicity) + factor(totalincome) +",
+                       "factor(puberty_stage) + factor(sleep_category) + factor(fam_hx) +",
+                       "factor(site_id_l) + s(rel_family_id, k =", best_k_outcome, ")")),
+      data = df_sample
+    )
+    
+
+    M_pred <- predict(mediator_model, newdata = df_sample)
+    Y_pred <- predict(outcome_model, newdata = df_sample)
+    
+
+    coef(lm(Y_pred ~ M_pred, data = df_sample))[2]
+  })
+  
+
+  mean_indirect_effect <- mean(bootstrap_results)
+  ci_indirect_effect <- quantile(bootstrap_results, c(0.025, 0.975))
+  
+
+  all_results[[cognition_col]] <- list(
+    mediator_model = best_mediator_model,
+    outcome_model = best_outcome_model,
+    total_effect_model = best_total_effect_model,
+    best_k_mediator = best_k_mediator,
+    best_k_outcome = best_k_outcome,
+    best_k_total_effect = best_k_total_effect,
+    indirect_effect = list(coefficient = indirect_effect_coefficient,
+                           mean = mean_indirect_effect,
+                           ci = ci_indirect_effect),
+    mediation_proportion = mediation_proportion
+  )
+  all_bootstrap_results[[cognition_col]] <- list(mean = mean_indirect_effect, ci = ci_indirect_effect)
+}
+
+
+indirect_effects <- data.frame(
+  Cognition_Outcome = cognition_outcomes,
+  Indirect_Effect = sapply(all_bootstrap_results, function(x) x$mean),
+  CI_Lower = sapply(all_bootstrap_results, function(x) x$ci[1]),
+  CI_Upper = sapply(all_bootstrap_results, function(x) x$ci[2]),
+  Mediation_Proportion = sapply(all_results, function(x) x$mediation_proportion)
+)
+
+
+print(indirect_effects)
+```
+
+
+```{r}
+#COI Overall -> SLF-I right -> Cognition --- Mediation model
+
+fit_and_evaluate_gam <- function(data, response, predictors, smooth_terms, k_values) {
+  results <- list()  
+  
+  for (k in k_values) {
+
+    smooth_formula <- paste(
+      sapply(smooth_terms, function(term) paste0("s(", term, ", k = ", k, ")")),
+      collapse = " + "
+    )
+    
+    full_formula <- paste(response, "~", smooth_formula, "+", paste(predictors, collapse = " + "))
+    
+    # Fit the GAM model
+    gam_model <- gam(as.formula(full_formula), data = data)
+    
+
+    results[[paste("k =", k)]] <- list(model = gam_model, AIC = AIC(gam_model))
+  }
+  
+
+  best_k <- as.numeric(gsub("k = ", "", names(which.min(sapply(results, function(x) x$AIC)))))
+  best_model <- results[[paste("k =", best_k)]]$model
+  
+  return(list(best_model = best_model, best_k = best_k, all_results = results))
+}
+
+
+k_values <- seq(3, 11, by = 1)
+
+
+mediator_smooth_terms <- c("coi_total_raw", "interview_age", "parenteducation", "bmi", "rel_family_id", "dmri_meanmotion")
+mediator_linear_predictors <- c(
+  "factor(sex)", "factor(race)", "factor(ethnicity)", "factor(totalincome)",
+  "factor(puberty_stage)", "factor(sleep_category)", "factor(fam_hx)"
+)
+
+outcome_smooth_terms <- c("SLF_I_right_Ten1_FA", "coi_total_raw", "interview_age", "parenteducation", "bmi", "rel_family_id", "dmri_meanmotion")
+outcome_linear_predictors <- c(
+  "factor(sex)", "factor(race)", "factor(ethnicity)", "factor(totalincome)",
+  "factor(puberty_stage)", "factor(sleep_category)", "factor(fam_hx)", "factor(site_id_l)"
+)
+
+total_effect_smooth_terms <- c("coi_total_raw", "interview_age", "parenteducation", "bmi", "rel_family_id")
+total_effect_linear_predictors <- c(
+  "factor(sex)", "factor(race)", "factor(ethnicity)", "factor(totalincome)",
+  "factor(puberty_stage)", "factor(sleep_category)", "factor(fam_hx)", "factor(site_id_l)"
+)
+
+
+all_results <- list()
+all_bootstrap_results <- list()
+
+
+cognition_outcomes <- grep("^nihtbx_", names(df), value = TRUE)
+
+
+for (cognition_col in cognition_outcomes) {
+  cat("Processing:", cognition_col, "\n")
+  
+  # Step 1: Mediator Model (FA ~ COI + Covariates + dmri_meanmotion)
+  mediator_results <- fit_and_evaluate_gam(
+    data = df,
+    response = "SLF_I_right_Ten1_FA",
+    predictors = mediator_linear_predictors,
+    smooth_terms = mediator_smooth_terms,
+    k_values = k_values
+  )
+  best_mediator_model <- mediator_results$best_model
+  best_k_mediator <- mediator_results$best_k
+  
+  # Print summary for the mediator model
+  cat("\n--- Summary for Mediator Model (FA ~ COI) ---\n")
+  print(summary(best_mediator_model))
+  cat("Best k for Mediator Model:", best_k_mediator, "\n")
+  
+  # Step 2: Outcome Model (Cognition ~ FA + COI + Covariates)
+  outcome_results <- fit_and_evaluate_gam(
+    data = df,
+    response = cognition_col,
+    predictors = outcome_linear_predictors,
+    smooth_terms = outcome_smooth_terms,
+    k_values = k_values
+  )
+  best_outcome_model <- outcome_results$best_model
+  best_k_outcome <- outcome_results$best_k
+  
+  # Print summary for the outcome model
+  cat("\n--- Summary for Outcome Model (Cognition ~ FA + COI) ---\n")
+  print(summary(best_outcome_model))
+  cat("Best k for Outcome Model:", best_k_outcome, "\n")
+  
+  # Step 3: Total Effect Model (Cognition ~ COI + Covariates)
+  total_effect_results <- fit_and_evaluate_gam(
+    data = df,
+    response = cognition_col,
+    predictors = total_effect_linear_predictors,
+    smooth_terms = total_effect_smooth_terms,
+    k_values = k_values
+  )
+  best_total_effect_model <- total_effect_results$best_model
+  best_k_total_effect <- total_effect_results$best_k
+  
+  # Print summary for the total effect model
+  cat("\n--- Summary for Total Effect Model (Cognition ~ COI + Covariates) ---\n")
+  print(summary(best_total_effect_model))
+  cat("Best k for Total Effect Model:", best_k_total_effect, "\n")
+  
+  # Step 4: Predict Mediator (FA) and Outcome (Cognition)
+  df$M_pred <- predict(best_mediator_model, newdata = df)  # Predicted FA
+  df$Y_pred <- predict(best_outcome_model, newdata = df)   # Predicted Cognition
+  
+  # Step 5: Compute Indirect Effect using Linear Regression
+  indirect_effect <- lm(Y_pred ~ M_pred, data = df)
+  indirect_effect_coefficient <- coef(indirect_effect)[2]
+  
+  # Step 6: Compute Mediation Proportion
+  total_effect <- summary(best_total_effect_model)$s.table["s(coi_total_raw)", "F"]
+  mediation_proportion <- indirect_effect_coefficient / total_effect
+  
+  # Step 7: Bootstrapping for Confidence Intervals
+  set.seed(123)
+  bootstrap_results <- replicate(1000, {
+    sample_indices <- sample(nrow(df), replace = TRUE)
+    df_sample <- df[sample_indices, ]
+    
+
+    mediator_model <- gam(
+      SLF_I_right_Ten1_FA ~ s(coi_total_raw, k = best_k_mediator) + 
+        s(interview_age, k = best_k_mediator) + s(dmri_meanmotion, k = best_k_mediator) +
+        factor(sex) + factor(race) + factor(ethnicity) + factor(totalincome) +
+        s(parenteducation, k = best_k_mediator) + s(bmi, k = best_k_mediator) +
+        factor(puberty_stage) + factor(sleep_category) + factor(fam_hx) +
+        s(rel_family_id, k = best_k_mediator),
+      data = df_sample
+    )
+    
+
+    outcome_model <- gam(
+      as.formula(paste(cognition_col, "~ s(SLF_I_right_Ten1_FA, k =", best_k_outcome, ") +",
+                       "s(coi_total_raw, k =", best_k_outcome, ") +",
+                       "s(interview_age, k =", best_k_outcome, ") +",
+                       "s(parenteducation, k =", best_k_outcome, ") +",
+                       "factor(sex) + factor(race) + factor(ethnicity) + factor(totalincome) +",
+                       "factor(puberty_stage) + factor(sleep_category) + factor(fam_hx) +",
+                       "factor(site_id_l) + s(rel_family_id, k =", best_k_outcome, ")")),
+      data = df_sample
+    )
+    
+
+    M_pred <- predict(mediator_model, newdata = df_sample)
+    Y_pred <- predict(outcome_model, newdata = df_sample)
+
+    coef(lm(Y_pred ~ M_pred, data = df_sample))[2]
+  })
+  
+
+  mean_indirect_effect <- mean(bootstrap_results)
+  ci_indirect_effect <- quantile(bootstrap_results, c(0.025, 0.975))
+  
+
+  all_results[[cognition_col]] <- list(
+    mediator_model = best_mediator_model,
+    outcome_model = best_outcome_model,
+    total_effect_model = best_total_effect_model,
+    best_k_mediator = best_k_mediator,
+    best_k_outcome = best_k_outcome,
+    best_k_total_effect = best_k_total_effect,
+    indirect_effect = list(coefficient = indirect_effect_coefficient,
+                           mean = mean_indirect_effect,
+                           ci = ci_indirect_effect),
+    mediation_proportion = mediation_proportion
+  )
+  all_bootstrap_results[[cognition_col]] <- list(mean = mean_indirect_effect, ci = ci_indirect_effect)
+}
+
+
+indirect_effects <- data.frame(
+  Cognition_Outcome = cognition_outcomes,
+  Indirect_Effect = sapply(all_bootstrap_results, function(x) x$mean),
+  CI_Lower = sapply(all_bootstrap_results, function(x) x$ci[1]),
+  CI_Upper = sapply(all_bootstrap_results, function(x) x$ci[2]),
+  Mediation_Proportion = sapply(all_results, function(x) x$mediation_proportion)
+)
+
+print(indirect_effects)
+```
+
+
+```{r}
+#COI SE -> SLF-I right -> Cognition --- Mediation model
+
+mediator_smooth_terms <- c("coi_se_raw", "interview_age", "parenteducation", "bmi", "rel_family_id", "dmri_meanmotion")
+mediator_linear_predictors <- c(
+  "factor(sex)", "factor(race)", "factor(ethnicity)", "factor(totalincome)",
+  "factor(puberty_stage)", "factor(sleep_category)", "factor(fam_hx)"
+)
+
+outcome_smooth_terms <- c("SLF_I_right_Ten1_FA", "coi_se_raw", "interview_age", "parenteducation", "bmi", "rel_family_id", "dmri_meanmotion")
+outcome_linear_predictors <- c(
+  "factor(sex)", "factor(race)", "factor(ethnicity)", "factor(totalincome)",
+  "factor(puberty_stage)", "factor(sleep_category)", "factor(fam_hx)", "factor(site_id_l)"
+)
+
+total_effect_smooth_terms <- c("coi_se_raw", "interview_age", "parenteducation", "bmi", "rel_family_id")
+total_effect_linear_predictors <- c(
+  "factor(sex)", "factor(race)", "factor(ethnicity)", "factor(totalincome)",
+  "factor(puberty_stage)", "factor(sleep_category)", "factor(fam_hx)", "factor(site_id_l)"
+)
+
+# Initialize lists to store results
+all_results <- list()
+all_bootstrap_results <- list()
+
+# Get all cognition outcome columns starting with "nihtbx_"
+cognition_outcomes <- grep("^nihtbx_", names(df), value = TRUE)
+
+# Process each cognition outcome
+for (cognition_col in cognition_outcomes) {
+  cat("Processing:", cognition_col, "\n")
+  
+  # Step 1: Mediator Model (FA ~ COI + Covariates + dmri_meanmotion)
+  mediator_results <- fit_and_evaluate_gam(
+    data = df,
+    response = "SLF_I_right_Ten1_FA",
+    predictors = mediator_linear_predictors,
+    smooth_terms = mediator_smooth_terms,
+    k_values = k_values
+  )
+  best_mediator_model <- mediator_results$best_model
+  best_k_mediator <- mediator_results$best_k
+  
+  # Print summary for the mediator model
+  cat("\n--- Summary for Mediator Model (FA ~ COI) ---\n")
+  print(summary(best_mediator_model))
+  cat("Best k for Mediator Model:", best_k_mediator, "\n")
+  
+  # Step 2: Outcome Model (Cognition ~ FA + COI + Covariates)
+  outcome_results <- fit_and_evaluate_gam(
+    data = df,
+    response = cognition_col,
+    predictors = outcome_linear_predictors,
+    smooth_terms = outcome_smooth_terms,
+    k_values = k_values
+  )
+  best_outcome_model <- outcome_results$best_model
+  best_k_outcome <- outcome_results$best_k
+  
+  # Print summary for the outcome model
+  cat("\n--- Summary for Outcome Model (Cognition ~ FA + COI) ---\n")
+  print(summary(best_outcome_model))
+  cat("Best k for Outcome Model:", best_k_outcome, "\n")
+  
+  # Step 3: Total Effect Model (Cognition ~ COI + Covariates)
+  total_effect_results <- fit_and_evaluate_gam(
+    data = df,
+    response = cognition_col,
+    predictors = total_effect_linear_predictors,
+    smooth_terms = total_effect_smooth_terms,
+    k_values = k_values
+  )
+  best_total_effect_model <- total_effect_results$best_model
+  best_k_total_effect <- total_effect_results$best_k
+  
+  # Print summary for the total effect model
+  cat("\n--- Summary for Total Effect Model (Cognition ~ COI + Covariates) ---\n")
+  print(summary(best_total_effect_model))
+  cat("Best k for Total Effect Model:", best_k_total_effect, "\n")
+  
+  # Step 4: Predict Mediator (FA) and Outcome (Cognition)
+  df$M_pred <- predict(best_mediator_model, newdata = df)  # Predicted FA
+  df$Y_pred <- predict(best_outcome_model, newdata = df)   # Predicted Cognition
+  
+  # Step 5: Compute Indirect Effect using Linear Regression
+  indirect_effect <- lm(Y_pred ~ M_pred, data = df)
+  indirect_effect_coefficient <- coef(indirect_effect)[2]
+  
+  # Step 6: Compute Mediation Proportion
+  total_effect <- summary(best_total_effect_model)$s.table["s(coi_se_raw)", "F"]
+  mediation_proportion <- indirect_effect_coefficient / total_effect
+  
+  # Step 7: Bootstrapping for Confidence Intervals
+  set.seed(123)
+  bootstrap_results <- replicate(1000, {
+    sample_indices <- sample(nrow(df), replace = TRUE)
+    df_sample <- df[sample_indices, ]
+
+    mediator_model <- gam(
+      SLF_I_right_Ten1_FA ~ s(coi_se_raw, k = best_k_mediator) + 
+        s(interview_age, k = best_k_mediator) + s(dmri_meanmotion, k = best_k_mediator) +
+        factor(sex) + factor(race) + factor(ethnicity) + factor(totalincome) +
+        s(parenteducation, k = best_k_mediator) + s(bmi, k = best_k_mediator) +
+        factor(puberty_stage) + factor(sleep_category) + factor(fam_hx) +
+        s(rel_family_id, k = best_k_mediator),
+      data = df_sample
+    )
+    
+
+    outcome_model <- gam(
+      as.formula(paste(cognition_col, "~ s(SLF_I_right_Ten1_FA, k =", best_k_outcome, ") +",
+                       "s(coi_se_raw, k =", best_k_outcome, ") +",
+                       "s(interview_age, k =", best_k_outcome, ") +",
+                       "s(parenteducation, k =", best_k_outcome, ") +",
+                       "factor(sex) + factor(race) + factor(ethnicity) + factor(totalincome) +",
+                       "factor(puberty_stage) + factor(sleep_category) + factor(fam_hx) +",
+                       "factor(site_id_l) + s(rel_family_id, k =", best_k_outcome, ")")),
+      data = df_sample
+    )
+    
+    M_pred <- predict(mediator_model, newdata = df_sample)
+    Y_pred <- predict(outcome_model, newdata = df_sample)
+    
+
+    coef(lm(Y_pred ~ M_pred, data = df_sample))[2]
+  })
+  
+
+  mean_indirect_effect <- mean(bootstrap_results)
+  ci_indirect_effect <- quantile(bootstrap_results, c(0.025, 0.975))
+  
+
+  all_results[[cognition_col]] <- list(
+    mediator_model = best_mediator_model,
+    outcome_model = best_outcome_model,
+    total_effect_model = best_total_effect_model,
+    best_k_mediator = best_k_mediator,
+    best_k_outcome = best_k_outcome,
+    best_k_total_effect = best_k_total_effect,
+    indirect_effect = list(coefficient = indirect_effect_coefficient,
+                           mean = mean_indirect_effect,
+                           ci = ci_indirect_effect),
+    mediation_proportion = mediation_proportion
+  )
+  all_bootstrap_results[[cognition_col]] <- list(mean = mean_indirect_effect, ci = ci_indirect_effect)
+}
+
+
+indirect_effects <- data.frame(
+  Cognition_Outcome = cognition_outcomes,
+  Indirect_Effect = sapply(all_bootstrap_results, function(x) x$mean),
+  CI_Lower = sapply(all_bootstrap_results, function(x) x$ci[1]),
+  CI_Upper = sapply(all_bootstrap_results, function(x) x$ci[2]),
+  Mediation_Proportion = sapply(all_results, function(x) x$mediation_proportion)
+)
+
+
+print(indirect_effects)
+
+```
+
+
