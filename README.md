@@ -1,6 +1,5 @@
 Neighborhood Opportunity, Cognitive Outcomes, and White Matter Microstructure: Insights from a Large Pediatric Study
 
-Published in: [Journal link here]
 
 Overview
 
